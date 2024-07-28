@@ -1,6 +1,6 @@
 #!/bin/sh
 
-# Copyright (c) 2014-2024 Franco Fichtner <franco@opnsense.org>
+# Copyright (c) 2014-2022 Franco Fichtner <franco@opnsense.org>
 # Copyright (c) 2010-2011 Scott Ullrich <sullrich@gmail.com>
 #
 # Redistribution and use in source and binary forms, with or without
@@ -304,9 +304,7 @@ done
 
 git_reset()
 {
-	if [ ${1} != ${TOOLSDIR} ]; then
-		git -C ${1} clean -xdqf .
-	fi
+	git -C ${1} clean -xdqf .
 	REPO_TAG=${2}
 	if [ -z "${REPO_TAG}" ]; then
 		git_tag ${1} ${PRODUCT_VERSION}
@@ -366,7 +364,6 @@ git_version()
 	if [ -z "$(echo ${PRODUCT_VERSION} | tr -d 0-9)" ]; then
 		git_describe ${1}
 		export PRODUCT_VERSION=${REPO_VERSION}
-		export PRODUCT_HASH=${REPO_COMMENT}
 	fi
 
 	if [ -z "${PRODUCT_VERSION%%*/*}" ]; then
@@ -411,9 +408,6 @@ git_branch()
 git_tag()
 {
 	# Fuzzy-match a tag and return it for the caller.
-	local FUZZY
-	local MAX
-	local VERSION
 
 	POOL=$(git -C ${1} tag | awk '$1 == "'"${2}"'"')
 	if [ -z "${POOL}" ]; then
@@ -549,7 +543,7 @@ setup_norun()
 	# prevent the start of configd
 	echo 'configd_enable="NO"' >> ${1}/etc/rc.conf.local
 
-	mount -t devfs devfs ${1}/dev 2> /dev/null || true
+	mount -t devfs devfs ${1}/dev 2>/dev/null || true
 }
 
 setup_chroot()
@@ -585,9 +579,6 @@ setup_version()
 	# embed size for general information
 	echo "${SIZE}" > ${VERSIONDIR}/${3}.size
 
-        # embed commit hash for identification
-	echo "${PRODUCT_HASH}" > ${VERSIONDIR}/${3}.hash
-
 	# embed target architecture
 	echo "${PRODUCT_ARCH}" > ${VERSIONDIR}/${3}.arch
 
@@ -610,19 +601,22 @@ setup_version()
 setup_base()
 {
 	echo ">>> Setting up base in ${1}"
-
-	tar -C ${1} -xpf ${SETSDIR}/base-*-${PRODUCT_ARCH}${PRODUCT_DEVICE+"-${PRODUCT_DEVICE}"}.txz
-	rm -f ${1}/.abi_hint
+		tar -C ${1} -xpf ${SETSDIR}/base-*-${PRODUCT_ARCH}${PRODUCT_DEVICE+"-${PRODUCT_DEVICE}"}.txz
+		rm -f ${1}/.abi_hint
 
 	# /home is needed for LiveCD images, and since it
 	# belongs to the base system, we create it from here.
-	mkdir -p ${1}/home
+	if [ ! -d "${1}/home" ]; then
+		mkdir -p ${1}/home
+	fi
 
 	# /conf is needed for the config subsystem at this
 	# point as the storage location.  We ought to add
 	# this here, because otherwise read-only install
 	# media wouldn't be able to bootstrap the directory.
-	mkdir -p ${1}/conf
+	if [ ! -d "${1}/conf" ]; then
+		mkdir -p ${1}/conf
+	fi
 }
 
 setup_kernel()
@@ -694,12 +688,12 @@ sign_image()
 	fi
 
 	if [ ! -f "${1}".sig ]; then
-		echo -n ">>> Creating ${PRODUCT_SETTINGS} signature for $(basename ${1}): "
+		echo -n ">>> Creating ${PRODUCT_SETTINGS} signature for ${1}: "
 
 		openssl dgst -sha256 -sign "${PRODUCT_PRIVKEY}" "${1}" | \
 		    openssl base64 > "${1}".sig
 	else
-		echo -n ">>> Retaining ${PRODUCT_SETTINGS} signature for $(basename ${1}): "
+		echo -n ">>> Retaining ${PRODUCT_SETTINGS} signature for ${1}: "
 	fi
 
 	openssl base64 -d -in "${1}".sig > "${1}.sig.tmp"
@@ -767,8 +761,11 @@ find_set()
 	kernel)
 		echo $(find ${SETSDIR} -name "kernel-*-${PRODUCT_ARCH}${PRODUCT_DEVICE+"-${PRODUCT_DEVICE}"}.txz")
 		;;
-	aux|packages|release)
-		echo $(find ${SETSDIR} -name "${1}-*-${PRODUCT_ARCH}.tar")
+	packages)
+		echo $(find ${SETSDIR} -name "packages-*-${PRODUCT_ARCH}.tar")
+		;;
+	release)
+		echo $(find ${SETSDIR} -name "release-*-${PRODUCT_ARCH}.tar")
 		;;
 	xtools)
 		echo $(find ${SETSDIR} -name "xtools-*-${PRODUCT_ARCH}.txz")
@@ -781,7 +778,7 @@ find_set()
 
 extract_packages()
 {
-	echo ">>> Extracting packages in ${1}"
+	echo ">>> Extracting packages in: ${1}"
 
 	BASEDIR=${1}
 
@@ -827,22 +824,6 @@ search_packages()
 	return 1
 }
 
-remove_packages()
-{
-	BASEDIR=${1}
-	shift
-	PKGLIST=${@}
-
-	echo ">>> Removing packages in ${BASEDIR}: ${PKGLIST}"
-
-	for PKG in ${PKGLIST}; do
-		for PKGFILE in $(cd ${BASEDIR}${PACKAGESDIR}; \
-		    find All -name "${PKG}-[0-9]*.pkg" -type f); do
-			rm ${BASEDIR}${PACKAGESDIR}/${PKGFILE}
-		done
-	done
-}
-
 prune_packages()
 {
 	BASEDIR=${1}
@@ -874,9 +855,6 @@ prune_packages()
 		# if nothing worked, we are missing a dependency and force
 		# a rebuild for it and its reverse dependencies later on
 		rm -f ${1}/${PKG}
-
-		echo ">>> Unresolvable conflict with package" \
-		    "$(basename ${PKG%%.pkg})" >> ${BASEDIR}/.pkg-msg
 	done
 
 	pkg -c ${1} set -yaA1
@@ -915,54 +893,6 @@ unlock_packages()
 	done
 }
 
-install_packages()
-{
-	BASEDIR=${1}
-	shift
-	PKGLIST=${@}
-
-	echo ">>> Installing packages in ${BASEDIR}: ${PKGLIST}"
-
-	# remove previous packages for a clean environment
-	pkg -c ${BASEDIR} remove -fya
-
-	# Adds all selected packages and fails if one cannot
-	# be installed.  Used to build a runtime environment.
-	for PKG in pkg ${PKGLIST}; do
-		if [ -n "$(echo "${PKG}" | sed 's/[^*]*//')" ]; then
-			echo "Cannot install globbed package: ${PKG}" >&2
-			exit 1
-		fi
-		PKGFOUND=
-		for PKGFILE in $({
-			cd ${BASEDIR}
-			find .${PACKAGESDIR}/All -name ${PKG}-[0-9]*.pkg
-		}); do
-			pkg -c ${BASEDIR} add ${PKGFILE}
-			PKGFOUND=1
-		done
-		if [ -z "${PKGFOUND}" ]; then
-			echo "Could not find package: ${PKG}" >&2
-			return 1
-		fi
-	done
-
-	# collect all installed packages (minus locked packages)
-	PKGLIST="$(pkg -c ${BASEDIR} query -e "%k != 1" %n)"
-
-	for PKG in ${PKGLIST}; do
-		# add, unlike install, is not aware of repositories :(
-		pkg -c ${BASEDIR} annotate -qyA ${PKG} \
-		    repository ${PRODUCT_NAME}
-
-		# create the package version file for initial install
-		if [ "${PKG}" = "${PRODUCT_CORE}" ]; then
-			pkg -c ${BASEDIR} query %v ${PKG} > \
-			    ${BASEDIR}/usr/local/opnsense/version/pkgs
-		fi
-	done
-}
-
 custom_packages()
 {
 	chroot ${1} /bin/sh -es << EOF
@@ -977,6 +907,74 @@ EOF
 	if [ -n "${PRODUCT_REBUILD}" ]; then
 		echo ">>> Rebuilt version ${5} for ${4}" >> ${1}/.pkg-msg
 	fi
+}
+
+install_packages()
+{
+	BASEDIR=${1}
+	shift
+	PKGLIST=${@}
+
+	echo ">>> Installing packages in ${BASEDIR}: ${PKGLIST}"
+
+	# remove previous packages for a clean environment
+	pkg -c ${BASEDIR} remove -ayf
+
+	# Adds all selected packages and fails if one cannot
+	# be installed.  Used to build a runtime environment.
+	for PKG in pkg ${PKGLIST}; do
+		if [ -n "$(echo "${PKG}" | sed 's/[^*]*//')" ]; then
+			echo "Cannot install globbed package: ${PKG}" >&2
+			exit 1
+		fi
+		PKGFOUND=
+		for PKGFILE in $(cd ${BASEDIR}; find .${PACKAGESDIR}/All -type f -iname ${PKG}-[0-9]*.pkg); do
+			pkg -c ${BASEDIR} add ${PKGFILE}
+			PKGFOUND=1
+		done
+		if [ -z "${PKGFOUND}" ]; then
+			echo "Could not find package: ${PKG}" >&2
+			return 1
+		fi
+	done
+
+	# Installing additional packages
+	#echo ">>> Installing additional packages"
+	#	pkg -c ${BASEDIR} add ${PACKAGESDIR}/All/gost-engine-g20220520.pkg
+	#	cd ${BASEDIR}/usr/lib/engines && ln -sfn /usr/local/lib/engines-1.1/gost.so.1.1 gost.so
+	#	sed -i '' '29 s/\:\\/,OPENSSL_CONF=\/usr\/local\/etc\/ssl\/opnsense.cnf\:\\/' ${BASEDIR}/etc/login.conf
+	
+	#	pkg -c ${BASEDIR} add ${PACKAGESDIR}/All/compat12x-amd64-12.2.1202000.20210406.pkg
+	#	if [ ! -e ${BASEDIR}/tmp/drweb-11.1.4-av-igw-freebsd-amd64.run ]; then
+	#		curl -o ${BASEDIR}/tmp/drweb-11.1.4-av-igw-freebsd-amd64.run https://cdn-download.drweb.com/pub/drweb/unix/gateway/11.1/drweb-11.1.4-av-igw-freebsd-amd64.run
+	#	fi
+	#	chmod +x ${BASEDIR}/tmp/drweb-11.1.4-av-igw-freebsd-amd64.run
+	#	chroot ${BASEDIR} /bin/sh -s << EOF
+	#	./tmp/drweb-11.1.4-av-igw-freebsd-amd64.run -- --non-interactive
+#EOF
+
+	# collect all installed packages (minus locked packages)
+	PKGLIST="$(pkg -c ${BASEDIR} query -e "%k != 1" %n)"
+
+	for PKG in ${PKGLIST}; do
+		# add, unlike install, is not aware of repositories :(
+		pkg -c ${BASEDIR} annotate -qyA ${PKG} repository ${PRODUCT_NAME}
+	done
+}
+
+remove_packages()
+{
+	BASEDIR=${1}
+	shift
+	PKGLIST=${@}
+
+	echo ">>> Removing packages in ${BASEDIR}: ${PKGLIST}"
+
+	for PKG in ${PKGLIST}; do
+		for PKGFILE in $(cd ${BASEDIR}${PACKAGESDIR}; find All -type f -iname "${PKG}-[0-9]*.pkg"); do
+			rm ${BASEDIR}${PACKAGESDIR}/${PKGFILE}
+		done
+	done
 }
 
 bundle_packages()
@@ -1025,10 +1023,8 @@ bundle_packages()
 	fi
 
 	# generate all signatures and add bootstrap links
-	for PKGFILE in $(cd ${BASEDIR}${PACKAGESDIR}-new; \
-	    find All -type f); do
-		PKGINFO=$(pkg info -F ${BASEDIR}${PACKAGESDIR}-new/${PKGFILE} \
-		    | grep ^Name | awk '{ print $3; }')
+	for PKGFILE in $(cd ${BASEDIR}${PACKAGESDIR}-new; find All -type f); do
+		PKGINFO=$(pkg info -F ${BASEDIR}${PACKAGESDIR}-new/${PKGFILE} | grep ^Name | awk '{ print $3; }')
 		LATESTDIR=${BASEDIR}${PACKAGESDIR}-new/Latest
 		ln -sfn ../${PKGFILE} ${LATESTDIR}/${PKGINFO}.pkg
 		generate_signature \
@@ -1040,27 +1036,10 @@ bundle_packages()
 
 	echo ${SRCABI} > ${BASEDIR}${PACKAGESDIR}-new/.abi_hint
 
+	sh ./clean.sh packages
+
 	PACKAGEVER="${PRODUCT_VERSION}-${PRODUCT_ARCH}"
 	PACKAGESET="${SETSDIR}/packages-${PACKAGEVER}.tar"
-	AUXSET="${SETSDIR}/aux-${PACKAGEVER}.tar"
-
-	if [ -d ${BASEDIR}${PACKAGESDIR}-aux ]; then
-		sh ./clean.sh aux
-
-		# generate index files (XXX ideally from a chroot)
-		pkg repo ${BASEDIR}${PACKAGESDIR}-aux/ ${SIGNARGS}
-
-		echo ${SRCABI} > ${BASEDIR}${PACKAGESDIR}-aux/.abi_hint
-
-		echo -n ">>> Creating aux package set for ${PACKAGEVER}... "
-		tar -C ${BASEDIR}${PACKAGESDIR}-aux -cf ${AUXSET} .
-		echo "done"
-
-		generate_signature ${AUXSET}
-	fi
-
-	sh ./clean.sh ports
-
 	echo -n ">>> Creating package mirror set for ${PACKAGEVER}... "
 	tar -C ${BASEDIR}${PACKAGESDIR}-new -cf ${PACKAGESET} .
 	echo "done"
@@ -1087,6 +1066,12 @@ setup_packages()
 	setup_norun ${1}
 	extract_packages ${1}
 	install_packages ${@} ${PRODUCT_ADDITIONS} ${PRODUCT_CORE}
+
+	#echo ">>> Setting up repository"
+	#	extract_packages ${1}/usr/local
+	#	cd ${1}/tmp && chmod -x drweb-11.1.4-av-igw-freebsd-amd64.run
+	#	mv ${1}/tmp/drweb-11.1.4-av-igw-freebsd-amd64.run ${1}/usr/local${PACKAGESDIR}/All
+	#	find ${1}/usr/local${PACKAGESDIR} -name '.*' ! -name '.' ! -name '..' -delete
 
 	# remove package repository
 	rm -rf ${1}${PACKAGESDIR}
@@ -1117,18 +1102,18 @@ _setup_extras_generic()
 
 _setup_extras_device()
 {
-	if [ ! -f ${DEVICEDIR}/${PRODUCT_DEVICE_REAL}.conf ]; then
+	if [ ! -f ${DEVICEDIR}/${PRODUCT_DEVICE}.conf ]; then
 		return
 	fi
 
 	unset -f ${2}_hook
 
-	. ${DEVICEDIR}/${PRODUCT_DEVICE_REAL}.conf
+	. ${DEVICEDIR}/${PRODUCT_DEVICE}.conf
 
 	if [ -n "$(type ${2}_hook 2> /dev/null)" ]; then
-		echo ">>> Begin ${PRODUCT_DEVICE_REAL} extra: ${2}_hook"
+		echo ">>> Begin ${PRODUCT_DEVICE} extra: ${2}_hook"
 		${2}_hook ${1}
-		echo ">>> End ${PRODUCT_DEVICE_REAL} extra: ${2}_hook"
+		echo ">>> End ${PRODUCT_DEVICE} extra: ${2}_hook"
 	fi
 }
 
@@ -1245,8 +1230,7 @@ list_config()
 		if [ -n "${LIST_IGNORE}" -a -n "${LIST_MATCH}" ]; then
 			for LIST_QUIRK in $(echo ${LIST_IGNORE} | tr ',' ' '); do
 				if [ ${LIST_QUIRK} = ${PRODUCT_TARGET} -o \
-				     ${LIST_QUIRK} = ${PRODUCT_ARCH} -o \
-				     ${LIST_QUIRK} = ${PRODUCT_SSL} ]; then
+				     ${LIST_QUIRK} = ${PRODUCT_ARCH} ]; then
 					continue 2
 				fi
 			done

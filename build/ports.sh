@@ -1,6 +1,6 @@
 #!/bin/sh
 
-# Copyright (c) 2014-2024 Franco Fichtner <franco@opnsense.org>
+# Copyright (c) 2014-2023 Franco Fichtner <franco@opnsense.org>
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions
@@ -34,9 +34,9 @@ SELF=ports
 eval ${PORTSENV}
 
 ARGS=${*}
-DEPS=packages
+DEPS=
 
-for OPT in BATCH DEPEND MISMATCH PRUNE; do
+for OPT in BATCH DEPEND PRUNE; do
 	VAL=$(eval echo \$${OPT});
 	case ${VAL} in
 	yes|no)
@@ -70,14 +70,9 @@ setup_chroot ${STAGEDIR}
 setup_distfiles ${STAGEDIR}
 
 if extract_packages ${STAGEDIR}; then
-	AUXSET=$(find_set aux)
-	if [ -f "${AUXSET}" ]; then
-		tar -C ${STAGEDIR}${PACKAGESDIR} -xpf ${AUXSET} ./All
-	fi
-
 	if [ ${DEPEND} = "yes" ]; then
 		ARGS="${ARGS} ${PRODUCT_CORES} ${PRODUCT_PLUGINS}"
-		DEPS="${DEPS} plugins core"
+		DEPS="plugins core"
 	fi
 	remove_packages ${STAGEDIR} ${ARGS}
 	if [ ${PRUNE} = "yes" ]; then
@@ -142,19 +137,15 @@ UNAME_r=\$(freebsd-version)
 	# check whether the package is available
 	# under a different version number
 	PKGNAME=\$(basename \${PKGFILE})
-	PKGNAME=\${PKGNAME%%-[0-9]*}
+	PKGNAME=\${PKGNAME%-[a-z0-9]*}
 	PORT_DESCR="\${PORT_ORIGIN} (\${PKGNAME})"
 	PKGLINK=${PACKAGESDIR}/Latest/\${PKGNAME}.pkg
 	if [ -L \${PKGLINK} ]; then
 		PKGFILE=\$(readlink -f \${PKGLINK} || true)
 		if [ -f \${PKGFILE} ]; then
-			if [ ${MISMATCH} = "no" ]; then
-				rm ${PACKAGESDIR}*/All/\$(basename \${PKGFILE})
-			else
-				PKGVERS=\$(make -C ${PORTSDIR}/\${PORT} -v PKGVERSION \${MAKE_ARGS})
-				echo ">>> Skipped version \${PKGVERS} for \${PORT_DESCR}" >> /.pkg-msg
-				continue
-			fi
+			PKGVERS=\$(make -C ${PORTSDIR}/\${PORT} -v PKGVERSION \${MAKE_ARGS})
+			echo ">>> Skipped version \${PKGVERS} for \${PORT_DESCR}" >> /.pkg-msg
+			continue
 		fi
 	fi
 
@@ -202,12 +193,12 @@ UNAME_r=\$(freebsd-version)
 	pkg autoremove -y
 
 	for PKGNAME in \$(pkg query %n); do
-		OLD=\$(find ${PACKAGESDIR}/All -name "\${PKGNAME}-[0-9]*.pkg")
+		OLD=\$(find ${PACKAGESDIR}/All -type f -iname "\${PKGNAME}-[a-z0-9]*.pkg")
 		if [ -n "\${OLD}" ]; then
 			# already found
 			continue
 		fi
-		NEW=\$(find ${PACKAGESDIR}-cache/All -name "\${PKGNAME}-[0-9]*.pkg")
+		NEW=\$(find ${PACKAGESDIR}-cache/All -type f -iname "\${PKGNAME}-[a-z0-9]*.pkg")
 		echo ">>> Saving runtime package: \${PKGNAME}"
 		cp \${NEW} ${PACKAGESDIR}/All
 	done
